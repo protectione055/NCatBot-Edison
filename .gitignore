@@ -1,0 +1,5 @@
+data/
+logs/
+napcat/
+third_party/
+config.yaml
