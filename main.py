@@ -1,5 +1,8 @@
 import os
 import requests
+import json
+import re
+import requests
 
 from ncatbot.core import BotClient
 from ncatbot.core import GroupMessage
@@ -14,5 +17,6 @@ bot = BotClient()
 async def on_group_message(msg:GroupMessage):
     if msg.raw_message == "你好":
         await bot.api.post_group_msg(msg.group_id, text="你好呀，有什么需要我帮忙的吗？")
+
 
 bot.run()

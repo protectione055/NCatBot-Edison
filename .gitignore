@@ -3,3 +3,4 @@ logs/
 napcat/
 third_party/
 config.yaml
+__pycache__/
