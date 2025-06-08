@@ -28,16 +28,29 @@ class BilibiliDownloader(BasePlugin):
     author = "taurean_zz"
     description = "提取Bilibili分享链接视频"
     tmp_dir = Path("plugins/BilibiliDownloader/temp")  # 临时文件目录
+    bvcode_regex = r"^BV[1-9][A-Za-z0-9]{9}$"
 
     dependencies = {
         # "access": ">=1.0.0"
     }
 
     async def on_load(self):
+        self.register_config(
+            key="preview",
+            default=True,
+            value_type="bool"
+        )
         self.register_user_func(
-            name="bilibili_handler",
+            name="cqcard_handler",
             handler=self.bilibili_cqjson_handler,
             regex=r"\[CQ:json,data=(.*b23\.tv.*)\]",
+            tags=["user"],
+        )
+
+        self.register_user_func(
+            name="bvcode_handler",
+            handler=self.bilibili_bvcode_handler,
+            regex=self.bvcode_regex,
             tags=["user"],
         )
 
@@ -47,30 +60,53 @@ class BilibiliDownloader(BasePlugin):
     async def bilibili_cqjson_handler(self, msg: BaseMessage):
         # 解析消息卡片中的Bilibili链接
         match = re.search(r'\[CQ:json,data=(.*)\]', msg.raw_message)
-        video_path = None
+        qqdocurl = ""
         if match:
             content = match.group(1).replace("&#44;", ",")
             LOG.debug(f"Extracted JSON string: {content}")
-            try:
-                data = json.loads(content)
-                LOG.debug(f"Received Bilibili data: {json.dumps(data, ensure_ascii=False, indent=2)}")
-                qqdocurl = data['meta']['detail_1']['qqdocurl']
-                video_urls, audio_urls = await self.__get_urls(qqdocurl)
-                if video_urls is None or audio_urls is None:
-                    LOG.warning("No video or audio URLs found in the data.")
-                    return
-                # 获取视频和音频数据
-                video_id, video_path, audio_path = await self.__get_media(video_urls, audio_urls)
-                if video_path is None or audio_path is None:
-                    LOG.error("Failed to download video or audio.")
-                    return
-                # 合并视频和音频数据
-                video_path = await self.__merge_video_audio(video_id, video_path, audio_path)
-            except json.JSONDecodeError as e:
-                LOG.error(f"JSON decode error: {e}")
-            
-        if video_path is not None:
-            await self.__send_video(msg, video_path)
+            data = json.loads(content)
+            LOG.debug(f"Received Bilibili data: {json.dumps(data, ensure_ascii=False, indent=2)}")
+            qqdocurl = data['meta']['detail_1']['qqdocurl']
+            # 获取并发送视频
+            await self.__send_vide_by_url(msg, qqdocurl)
+        else:
+            LOG.warning("No valid Bilibili CQ card found in the message.")
+
+    async def bilibili_bvcode_handler(self, msg: BaseMessage):
+        """
+        处理Bilibili视频链接或BV号
+        """
+        # 提取BV号或AV号
+        bv_code = re.search(self.bvcode_regex, msg.raw_message)
+        if bv_code:
+            bv_code = bv_code.group(0)
+            url = f"https://www.bilibili.com/video/{bv_code}"
+            LOG.info(f"Extracted Bilibili URL: {url}")
+            await self.__send_vide_by_url(msg, url)
+        else:
+            LOG.warning("No valid Bilibili video code found in the message.")
+
+    async def __send_vide_by_url(self, msg: BaseMessage, url: str):
+        """
+        通过Bilibili视频链接发送视频
+        """
+        # TODO: 生成预览
+        # 获取视频和音频
+        video_urls, audio_urls = await self.__get_urls(url)
+        if video_urls is None or audio_urls is None:
+            LOG.warning("No video or audio URLs found in the provided URL.")
+            return
+
+        # 获取视频和音频数据
+        video_id, video_path, audio_path = await self.__get_media(video_urls, audio_urls)
+        if video_path is None or audio_path is None:
+            LOG.error("Failed to download video or audio.")
+            return
+
+        # 合并视频和音频数据
+        merged_video_path = await self.__merge_video_audio(video_id, video_path, audio_path)
+        # 发送合并后的视频
+        await self.__send_video(msg, merged_video_path)
 
     async def __send_video(self, msg: BaseMessage, video_path: str):
         send_msg = MessageChain(
@@ -135,6 +171,7 @@ class BilibiliDownloader(BasePlugin):
         合并视频和音频数据
         返回完整视频的文件名
         """
+        video_path = ""
         try:
             video_path = os.path.join(self.tmp_dir, f"video_{video_id}.mp4")
             cmd = f"ffmpeg -y -i {video_data} -i {audio_data} -c:v h264_nvenc -c:a aac -strict experimental {video_path}"
@@ -144,6 +181,6 @@ class BilibiliDownloader(BasePlugin):
             os.remove(audio_data)  # 删除临时音频文件
         except subprocess.CalledProcessError as e:
             LOG.error(f"FFmpeg command failed: {e}")
-            return None
+            return ""
 
         return os.path.realpath(video_path)
