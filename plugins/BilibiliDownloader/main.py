@@ -1,6 +1,6 @@
 from ncatbot.plugin import BasePlugin, CompatibleEnrollment, get_global_access_controller
 from ncatbot.core.message import BaseMessage
-from ncatbot.core import MessageChain, Image, Video
+from ncatbot.core import MessageChain, Image, Video, Text
 from ncatbot.utils import get_log, config
 from pathlib import Path
 
@@ -11,6 +11,7 @@ import time
 import json
 import requests
 import subprocess
+from bs4 import BeautifulSoup
 
 LOG = get_log("BilibiliDownloader")
 
@@ -32,6 +33,7 @@ class BilibiliDownloader(BasePlugin):
 
     dependencies = {
         # "access": ">=1.0.0"
+        "beautifulsoup4": ">=4.6.0"
     }
 
     async def on_load(self):
@@ -68,7 +70,7 @@ class BilibiliDownloader(BasePlugin):
             LOG.debug(f"Received Bilibili data: {json.dumps(data, ensure_ascii=False, indent=2)}")
             qqdocurl = data['meta']['detail_1']['qqdocurl']
             # 获取并发送视频
-            await self.__send_vide_by_url(msg, qqdocurl)
+            await self.__send_video_by_url(msg, qqdocurl)
         else:
             LOG.warning("No valid Bilibili CQ card found in the message.")
 
@@ -82,22 +84,29 @@ class BilibiliDownloader(BasePlugin):
             bv_code = bv_code.group(0)
             url = f"https://www.bilibili.com/video/{bv_code}"
             LOG.info(f"Extracted Bilibili URL: {url}")
-            await self.__send_vide_by_url(msg, url)
+            await self.__send_video_by_url(msg, url)
         else:
             LOG.warning("No valid Bilibili video code found in the message.")
 
-    async def __send_vide_by_url(self, msg: BaseMessage, url: str):
+    async def __send_video_by_url(self, msg: BaseMessage, url: str):
         """
         通过Bilibili视频链接发送视频
         """
-        # TODO: 生成预览
+        content = await self.__request_content(url)
+        
+        # 拼接文字简介
+        desc = "\n".join([
+            f"标题：{content['title']}",
+            f"简介：{content['description']}"
+        ])
+
         # 获取视频和音频
-        video_urls, audio_urls = await self.__get_urls(url)
+        video_urls = content["video_urls"]
+        audio_urls = content["audio_urls"]
         if video_urls is None or audio_urls is None:
             LOG.warning("No video or audio URLs found in the provided URL.")
             return
 
-        # 获取视频和音频数据
         video_id, video_path, audio_path = await self.__get_media(video_urls, audio_urls)
         if video_path is None or audio_path is None:
             LOG.error("Failed to download video or audio.")
@@ -105,40 +114,55 @@ class BilibiliDownloader(BasePlugin):
 
         # 合并视频和音频数据
         merged_video_path = await self.__merge_video_audio(video_id, video_path, audio_path)
-        # 发送合并后的视频
-        await self.__send_video(msg, merged_video_path)
 
-    async def __send_video(self, msg: BaseMessage, video_path: str):
-        send_msg = MessageChain(
-            [Video(file=video_path)]
-        )
+        # 发送消息
+        video_msg = MessageChain([
+            Video(file=merged_video_path)
+        ])
 
         if hasattr(msg, "group_id"):
-            await self.api.post_group_msg(msg.group_id, rtf=send_msg)
+            await self.api.post_group_msg(msg.group_id, text=desc)
+            await self.api.post_group_msg(msg.group_id, rtf=video_msg)
         else:
-            await self.api.post_private_msg(msg.user_id, rtf=send_msg)
+            await self.api.post_private_msg(msg.user_id, text=desc)
+            await self.api.post_private_msg(msg.user_id, rtf=video_msg)
+    
+    async def __request_content(self, url: str):
+        '''从url获取内容'''
+        content  = {}
+        response = None
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code != 200:
+                LOG.error(f"Failed to get urls, response content: {response.text}")
+        except requests.RequestException as e:
+            LOG.error(f"Request url: {url} failed with error: {e}")
 
-    async def __get_urls(self, request_url: str):
+        """
+        获取视频简介
+        """
+        soup = BeautifulSoup(response.text, "html.parser")
+        
+        content["title"] = re.split(r'_哔哩哔哩_', soup.title.string)[0] if soup.title else None
+        
+        desc_tag = soup.find("meta", attrs={"name": "description"})
+        description = desc_tag["content"] if desc_tag and "content" in desc_tag.attrs else ""
+        short_desc = re.split(r'作者简介', description)[0]
+        content["description"] = '\n'.join(short_desc.split(', '))
+        
+        
         """
         获取视频和音频的下载链接
         """
-        video_urls = None
-        audio_urls = None
-        try:
-            response = requests.get(request_url, headers=headers, timeout=10)
-            if response.status_code == 200:
-                json_data = json.loads(
-                    re.findall(
-                        "<script>window\.__playinfo__=(.*?)</script>", response.text
-                    )[0]
-                )
-                video_urls = json_data["data"]["dash"]["video"][0]["backupUrl"]
-                audio_urls = json_data["data"]["dash"]["audio"][0]["backupUrl"]
-            else:
-                LOG.error(f"Failed to get urls, response content: {response.text}")
-        except requests.RequestException as e:
-            LOG.error(f"Request url: {request_url} failed with error: {e}")
-        return video_urls, audio_urls
+        json_data = json.loads(
+            re.findall(
+                "<script>window\.__playinfo__=(.*?)</script>", response.text
+            )[0]
+        )
+        content["video_urls"] = json_data["data"]["dash"]["video"][0]["backupUrl"]
+        content["audio_urls"] = json_data["data"]["dash"]["audio"][0]["backupUrl"]
+
+        return content
 
     async def __get_media(self, video_urls: list, audio_urls: list):
         # 获取临时文件名
