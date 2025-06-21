@@ -55,6 +55,9 @@ class BilibiliDownloader(BasePlugin):
             regex=self.bvcode_regex,
             tags=["user"],
         )
+        
+        if not os.path.exists(self.tmp_dir):
+            os.makedirs(self.tmp_dir)
 
         print(f"{self.name} 插件已加载")
         print(f"插件版本: {self.version}")
@@ -69,8 +72,11 @@ class BilibiliDownloader(BasePlugin):
             data = json.loads(content)
             LOG.debug(f"Received Bilibili data: {json.dumps(data, ensure_ascii=False, indent=2)}")
             qqdocurl = data['meta']['detail_1']['qqdocurl']
+            bv_code = re.search(self.bvcode_regex, qqdocurl)
+            if bv_code:
+                bv_code = bv_code.group(0)
             # 获取并发送视频
-            await self.__send_video_by_url(msg, qqdocurl)
+            await self.__send_video_by_url(msg, qqdocurl, bv_code)
         else:
             LOG.warning("No valid Bilibili CQ card found in the message.")
 
@@ -84,11 +90,11 @@ class BilibiliDownloader(BasePlugin):
             bv_code = bv_code.group(0)
             url = f"https://www.bilibili.com/video/{bv_code}"
             LOG.info(f"Extracted Bilibili URL: {url}")
-            await self.__send_video_by_url(msg, url)
+            await self.__send_video_by_url(msg, url, bv_code)
         else:
             LOG.warning("No valid Bilibili video code found in the message.")
 
-    async def __send_video_by_url(self, msg: BaseMessage, url: str):
+    async def __send_video_by_url(self, msg: BaseMessage, url: str, video_id: str):
         """
         通过Bilibili视频链接发送视频
         """
@@ -100,20 +106,8 @@ class BilibiliDownloader(BasePlugin):
             f"简介：{content['description']}"
         ])
 
-        # 获取视频和音频
-        video_urls = content["video_urls"]
-        audio_urls = content["audio_urls"]
-        if video_urls is None or audio_urls is None:
-            LOG.warning("No video or audio URLs found in the provided URL.")
-            return
-
-        video_id, video_path, audio_path = await self.__get_media(video_urls, audio_urls)
-        if video_path is None or audio_path is None:
-            LOG.error("Failed to download video or audio.")
-            return
-
         # 合并视频和音频数据
-        merged_video_path = await self.__merge_video_audio(video_id, video_path, audio_path)
+        merged_video_path = await self.__merge_video_audio(video_id, content)
 
         # 发送消息
         video_msg = MessageChain([
@@ -147,7 +141,7 @@ class BilibiliDownloader(BasePlugin):
         
         desc_tag = soup.find("meta", attrs={"name": "description"})
         description = desc_tag["content"] if desc_tag and "content" in desc_tag.attrs else ""
-        short_desc = re.split(r'作者简介', description)[0]
+        short_desc = re.split(r'作者简介', description)[0].strip()
         content["description"] = '\n'.join(short_desc.split(', '))
         
         
@@ -180,7 +174,7 @@ class BilibiliDownloader(BasePlugin):
             audio_data = requests.get(url=audio_urls[0], headers=headers).content
         except requests.RequestException as e:
             LOG.error(f"Failed to download media: {e}")
-            return temp_id, None, None
+            return None, None
 
         # 内容写入临时文件
         with open(video_path, "wb") as video_file:
@@ -188,16 +182,31 @@ class BilibiliDownloader(BasePlugin):
         with open(audio_path, "wb") as audio_file:
             audio_file.write(audio_data)
 
-        return temp_id, video_path, audio_path
+        return video_path, audio_path
 
-    async def __merge_video_audio(self, video_id: str, video_data: str, audio_data: str):
+    async def __merge_video_audio(self, video_id: str, content: dict):
         """
         合并视频和音频数据
         返回完整视频的文件名
         """
-        video_path = ""
+        video_path = os.path.join(self.tmp_dir, f"{video_id}.mp4")
+        if os.path.exists(video_path):
+            return os.path.realpath(video_path)
+
         try:
-            video_path = os.path.join(self.tmp_dir, f"video_{video_id}.mp4")
+            # TODO: 获取视频封面
+            # 获取视频和音频
+            video_urls = content["video_urls"]
+            audio_urls = content["audio_urls"]
+            if video_urls is None or audio_urls is None:
+                LOG.warning("No video or audio URLs found in the provided URL.")
+                return ""
+
+            video_data, audio_data = await self.__get_media(video_urls, audio_urls)
+            if video_data is None or audio_data is None:
+                LOG.error("Failed to download video or audio.")
+                return ""
+
             cmd = f"ffmpeg -y -i {video_data} -i {audio_data} -c:v h264_nvenc -c:a aac -strict experimental {video_path}"
             subprocess.run(cmd, shell=True, check=True)
 
