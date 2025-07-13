@@ -33,7 +33,7 @@ class BilibiliDownloader(BasePlugin):
 
     dependencies = {
         # "access": ">=1.0.0"
-        "beautifulsoup4": ">=4.6.0"
+        # "beautifulsoup4": ">=4.6.0"
     }
 
     async def on_load(self):
